@@ -41,13 +41,16 @@ internal sealed class MetaResource
         if (count <= 0 || table < 0 || table + count * 16 > data.Length)
             throw new InvalidDataException("Resource has no valid meta block table.");
 
+        // Graphics pages (0x6... addresses, used for e.g. grass data) follow the system pages.
+        int systemSize = Rpf.RpfResourceEntry.SizeFromFlags(BinaryPrimitives.ReadUInt32LittleEndian(rsc7.AsSpan(8)));
+
         var blocks = new List<Block>(count);
         for (int i = 0; i < count; i++)
         {
             var s = data.AsSpan(table + i * 16, 16);
             uint hash = BinaryPrimitives.ReadUInt32LittleEndian(s);
             int length = BinaryPrimitives.ReadInt32LittleEndian(s[4..]);
-            int offset = SystemOffset(BinaryPrimitives.ReadInt64LittleEndian(s[8..]), data.Length);
+            int offset = VirtualOffset(BinaryPrimitives.ReadInt64LittleEndian(s[8..]), systemSize, data.Length);
             if (length < 0 || offset < 0 || offset + (long)length > data.Length)
                 throw new InvalidDataException("Meta block points outside the resource.");
             blocks.Add(new Block(hash, length, offset));
@@ -100,6 +103,18 @@ internal sealed class MetaResource
         {
             throw new InvalidDataException("Resource data is not valid compressed data.", ex);
         }
+    }
+
+    /// <summary>Maps a system (0x5...) or graphics (0x6...) page address to an offset in the data, or -1.</summary>
+    internal static int VirtualOffset(long address, int systemSize, int length)
+    {
+        long offset = (address >> 28) switch
+        {
+            5 => address & 0x0FFFFFFF,
+            6 => systemSize + (address & 0x0FFFFFFF),
+            _ => -1,
+        };
+        return offset >= 0 && offset < length ? (int)offset : -1;
     }
 
     /// <summary>Maps a 0x5xxxxxxx system-page virtual address to an offset, or -1.</summary>

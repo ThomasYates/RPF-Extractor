@@ -12,7 +12,20 @@ public enum OutputMode
     FiveM,
 }
 
-public enum ExtractionPhase { Scanning, Extracting, CheckingZFight, Completed }
+public enum ExtractionPhase
+{
+    Scanning,
+    Extracting,
+
+    /// <summary>Writing fxmanifest.lua and sorting meta files.</summary>
+    Finishing,
+
+    /// <summary>Copying the output for the z-fixed version (z-fight "Both").</summary>
+    CopyingForZFix,
+
+    CheckingZFight,
+    Completed,
+}
 
 public enum LogLevel { Info, Warning, Error }
 
@@ -39,6 +52,18 @@ public sealed class ExtractionOptions
 
     /// <summary>Base-game textures and model names, so vanilla-textured models aren't treated as grey.</summary>
     public GameAssetIndex? GameAssets { get; init; }
+
+    /// <summary>FiveM's allowed pool increases (fetched live by the app); null uses the built-in list.</summary>
+    public IReadOnlyDictionary<string, int>? PoolLimits { get; init; }
+
+    /// <summary>Free bytes on the drive holding a path (null = unknown). Replaceable for tests.</summary>
+    public Func<string, long?> FreeSpace { get; init; } = DefaultFreeSpace;
+
+    private static long? DefaultFreeSpace(string path)
+    {
+        try { return new DriveInfo(Path.GetPathRoot(Path.GetFullPath(path))!).AvailableFreeSpace; }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException) { return null; }
+    }
 }
 
 public sealed record ExtractionProgress(
@@ -65,4 +90,7 @@ public sealed class ExtractionResult
     /// <summary>Files already finished by an earlier, interrupted run.</summary>
     public int FilesResumed { get; init; }
     public long BytesRead { get; init; }
+
+    /// <summary>Pool size estimate and server.cfg advice (FiveM mode only).</summary>
+    public PoolReport? Pools { get; init; }
 }

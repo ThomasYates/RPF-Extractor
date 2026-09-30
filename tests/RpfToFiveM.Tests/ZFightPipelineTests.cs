@@ -108,6 +108,55 @@ public sealed class ZFightPipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task Both_ReportsEachStepInOrder()
+    {
+        var phases = new List<ExtractionPhase>();
+        await new RpfExtractor().RunAsync(new ExtractionOptions
+        {
+            SourceFolder = Source, OutputFolder = Output, Mode = OutputMode.FiveM, ZFight = ZFightMode.Both,
+        }, new SyncProgress(p => { lock (phases) phases.Add(p.Phase); }), null, new PauseController());
+
+        var order = phases.Distinct().ToList();
+        Assert.Equal(new[]
+        {
+            ExtractionPhase.Scanning, ExtractionPhase.Extracting, ExtractionPhase.Finishing,
+            ExtractionPhase.CopyingForZFix, ExtractionPhase.CheckingZFight, ExtractionPhase.Completed,
+        }, order);
+    }
+
+    [Fact]
+    public async Task CopyStep_ReportsBytesUntilComplete()
+    {
+        var copy = new List<ExtractionProgress>();
+        await new RpfExtractor().RunAsync(new ExtractionOptions
+        {
+            SourceFolder = Source, OutputFolder = Output, Mode = OutputMode.FiveM, ZFight = ZFightMode.Both,
+        }, new SyncProgress(p => { if (p.Phase == ExtractionPhase.CopyingForZFix) lock (copy) copy.Add(p); }), null, new PauseController());
+
+        var last = copy.Last();
+        Assert.True(last.BytesTotal > 0);
+        Assert.Equal(last.BytesTotal, last.BytesDone);
+        Assert.Equal(last.FilesTotal, last.FilesDone);
+    }
+
+    [Fact]
+    public async Task NotEnoughSpaceForCopy_SkipsZFixButKeepsTheMap()
+    {
+        var log = new List<LogEntry>();
+        var result = await new RpfExtractor().RunAsync(new ExtractionOptions
+        {
+            SourceFolder = Source, OutputFolder = Output, Mode = OutputMode.FiveM, ZFight = ZFightMode.Both,
+            FreeSpace = _ => 10, // bytes
+        }, null, e => { lock (log) log.Add(e); }, new PauseController());
+
+        Assert.True(File.Exists(Path.Combine(Output, "my_map", "fxmanifest.lua")));
+        Assert.False(Directory.Exists(Path.Combine(Output, "my_map_zfix")));
+        Assert.Null(result.FixedOutputRoot);
+        Assert.Equal(1, result.ErrorCount);
+        Assert.Contains(log, e => e.Level == LogLevel.Error && e.Message.Contains("space"));
+    }
+
+    [Fact]
     public void GameAssetIndex_CollectsTextureDictionariesAndModelNames()
     {
         var game = Path.Combine(_root, "game");
@@ -117,6 +166,9 @@ public sealed class ZFightPipelineTests : IDisposable
 
         var index = GameAssetIndex.Build(game, keys: null, CancellationToken.None);
 
+        Assert.Equal(1, index.CountOf(".ytd"));
+        Assert.Equal(1, index.CountOf(".ydr"));
+        Assert.True(index.Contains(".ydr", "OTHER"));
         Assert.Contains(YmapBuilder.Hash("vanilla_txd"), index.TextureDictionaries);
         Assert.DoesNotContain(YmapBuilder.Hash("other"), index.TextureDictionaries);
         Assert.Equal("other", index.Names[YmapBuilder.Hash("other")]);

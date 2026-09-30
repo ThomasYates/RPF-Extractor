@@ -132,6 +132,29 @@ public sealed class ExtractorTests : IDisposable
     }
 
     [Fact]
+    public async Task FiveMMode_WritesPoolSizeReport()
+    {
+        WriteSampleMod();
+
+        var result = await Run(OutputMode.FiveM);
+
+        Assert.NotNull(result.Pools);
+        Assert.True(File.Exists(Path.Combine(Output, "my_map", PoolAdvisor.ReportFileName)));
+        // The sample map adds one collision file; the base game counts come from the built-in snapshot.
+        Assert.Equal(1, result.Pools!.Pools.Single(p => p.Pool == "StaticBounds").MapAdds);
+    }
+
+    [Fact]
+    public async Task DumpMode_HasNoPoolReport()
+    {
+        WriteSampleMod();
+
+        var result = await Run(OutputMode.Dump);
+
+        Assert.Null(result.Pools);
+    }
+
+    [Fact]
     public async Task FiveMMode_SkipsDuplicateNamesAndReportsThem()
     {
         new RpfBuilder().AddResource("a/shared.ydr", new byte[] { 1 }).WriteTo(Path.Combine(Source, "a.rpf"));

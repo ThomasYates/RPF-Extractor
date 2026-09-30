@@ -51,6 +51,30 @@ public sealed class YmapFile
 
     /// <summary>Loaded on demand by a script (an IPL state such as burnt/unburnt), not always.</summary>
     public bool IsScripted { get; }
+
+    // Counts of CMapData's other arrays (each count sits 8 bytes into its array field).
+    private int Count(int field) =>
+        _mapData + field + 10 <= _meta.Data.Length ? BinaryPrimitives.ReadUInt16LittleEndian(_meta.Data.AsSpan(_mapData + field + 8)) : 0;
+
+    /// <summary>Batches of instanced grass/plants.</summary>
+    public int GrassBatches => Count(200);
+
+    /// <summary>Everything a ymap can hold besides entities and grass.</summary>
+    private int OtherContent =>
+        Count(112)    // container LODs
+        + Count(128)  // box occluders
+        + Count(144)  // occlusion models
+        + Count(184)  // instanced props
+        + Count(224)  // timecycle modifiers
+        + Count(240)  // car generators
+        + Count(256)  // LOD lights
+        + Count(392); // distant LOD lights
+
+    /// <summary>No entities, grass or anything else: the file does nothing.</summary>
+    public bool IsEmpty => Entities.Count == 0 && GrassBatches == 0 && OtherContent == 0;
+
+    /// <summary>Only instanced grass/plants: removing it loses ground cover but no buildings.</summary>
+    public bool IsGrassOnly => Entities.Count == 0 && GrassBatches > 0 && OtherContent == 0;
     public IReadOnlyList<YmapEntity> Entities => _entities;
 
     private YmapFile(MetaResource meta, int mapData)

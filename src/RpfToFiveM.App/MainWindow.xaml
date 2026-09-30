@@ -130,8 +130,44 @@
                         <TextBlock Text="{Binding StatusText}" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Bottom" Margin="0,0,0,4" />
                     </DockPanel>
 
+                    <TextBlock Style="{StaticResource Note}" FontSize="12" Margin="0,4,0,0" Foreground="{StaticResource InkDim}"
+                               Text="{Binding StepText}" />
+
                     <ProgressBar Style="{StaticResource FlatProgress}" Margin="0,10,0,0"
                                  Value="{Binding ProgressValue, Mode=OneWay}" IsIndeterminate="{Binding IsIndeterminate}" />
+
+                    <!-- Step tracker: done steps ticked, current one highlighted -->
+                    <ItemsControl ItemsSource="{Binding Steps}" Margin="0,10,0,0" Focusable="False">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type local:StepItem}">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock x:Name="Sep" Text="›" Foreground="{StaticResource InkFaint}" Margin="10,0,10,0" FontSize="12" />
+                                    <TextBlock x:Name="Lbl" Text="{Binding Label}" FontSize="12" Foreground="{StaticResource InkFaint}" />
+                                </StackPanel>
+                                <DataTemplate.Triggers>
+                                    <DataTrigger Binding="{Binding IsFirst}" Value="True">
+                                        <Setter TargetName="Sep" Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding State}" Value="{x:Static local:StepState.Done}">
+                                        <Setter TargetName="Lbl" Property="Foreground" Value="{StaticResource InkDim}" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding State}" Value="{x:Static local:StepState.Active}">
+                                        <Setter TargetName="Lbl" Property="Foreground" Value="{StaticResource Signal}" />
+                                        <Setter TargetName="Lbl" Property="FontWeight" Value="SemiBold" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding State}" Value="{x:Static local:StepState.Stopped}">
+                                        <Setter TargetName="Lbl" Property="Foreground" Value="{StaticResource Bad}" />
+                                        <Setter TargetName="Lbl" Property="FontWeight" Value="SemiBold" />
+                                    </DataTrigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
 
                     <Grid Margin="0,16,0,0">
                         <Grid.ColumnDefinitions>
@@ -165,6 +201,26 @@
 
                     <TextBlock Margin="0,14,0,0" FontFamily="{StaticResource Mono}" FontSize="11.5" Foreground="{StaticResource InkDim}"
                                TextTrimming="CharacterEllipsis" Text="{Binding CurrentItem}" ToolTip="{Binding CurrentItem}" />
+
+                    <!-- server.cfg pool size advice (FiveM mode) -->
+                    <Border Margin="0,16,0,0" Padding="14,12" Background="#1E1A10" BorderBrush="#4A3A12" BorderThickness="1"
+                            Visibility="{Binding HasPoolAdvice, Converter={StaticResource BoolToVis}}">
+                        <StackPanel>
+                            <DockPanel>
+                                <Button DockPanel.Dock="Right" Content="Copy" Width="70" Height="26" Padding="8,0" FontSize="12"
+                                        Command="{Binding CopyPoolLinesCommand}"
+                                        Visibility="{Binding HasPoolLines, Converter={StaticResource BoolToVis}}" />
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="Add to server.cfg" VerticalAlignment="Center"
+                                           Foreground="{StaticResource Signal}" />
+                            </DockPanel>
+                            <TextBox Text="{Binding PoolLines, Mode=OneWay}" IsReadOnly="True" FontFamily="{StaticResource Mono}"
+                                     Height="Auto" MinHeight="30" Padding="8,6" Margin="0,8,0,0" TextWrapping="NoWrap"
+                                     VerticalContentAlignment="Top"
+                                     Visibility="{Binding HasPoolLines, Converter={StaticResource BoolToVis}}" />
+                            <TextBlock Style="{StaticResource Note}" Margin="0,8,0,0" Foreground="{StaticResource InkDim}"
+                                       Text="{Binding PoolNote}" />
+                        </StackPanel>
+                    </Border>
 
                     <DockPanel Margin="0,20,0,8">
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">

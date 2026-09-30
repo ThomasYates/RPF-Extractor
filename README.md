@@ -64,6 +64,40 @@ The base-game texture/model index is built from the game's archive tables the fi
 
 Each file is recorded in a journal (`%AppData%\RpfToFiveM\job\`) as soon as it has been fully written. If the app crashes, is killed, or is closed or stopped mid-run, the next launch shows a banner offering to **Resume job**. Resuming skips files that were already finished and redoes the file that was cut off. A run that finishes clears the journal automatically.
 
+## Pool sizes (FiveM mode)
+
+Every streamed file takes a slot in one of the game's pools, and the base game already fills a large part of each. After a FiveM export, the tool adds up the base game's usage (read from your GTA V install, or built-in Legacy counts) and what the map adds. Files that replace a base-game file of the same name don't count as new.
+
+| Pool | Holds | FiveM default |
+|---|---|---|
+| TxdStore | `.ytd` | 105,500 |
+| DrawableStore | `.ydr` | 235,300 |
+| DwdStore | `.ydd` | 240,000 |
+| FragmentStore | `.yft` | 60,700 |
+| StaticBounds | `.ybn` | 20,200 |
+| MapTypesStore | `.ytyp` | 3,000 |
+| MapDataStore | `.ymap` | 12,000 |
+| InteriorProxy | interiors (MLOs) | 9,060 |
+
+If a pool would be more than 90% full, the app shows ready-to-paste `server.cfg` lines with a Copy button:
+
+```
+increase_pool_size "StaticBounds" 3000
+```
+
+The increase covers the map plus 10% headroom, rounded up to 500 and capped at FiveM's limit. The limits come from FiveM's live list at `gss.cfx-services.net`, with a built-in copy used when offline. Pools FiveM doesn't let servers raise (currently MapDataStore, MapTypesStore, DrawableStore and DwdStore) get a warning instead, since the only fix is shipping fewer of those files. The full breakdown is written to `pool-sizes.txt` in the resource.
+
+### Fitting the ymap limit
+
+MapDataStore (`.ymap` files) is capped at 12,000 and can't be raised, so a large map can crash the game with `Pool Full, Size == 12000`. In FiveM mode the tool keeps the map under that limit, leaving 300 slots for other resources:
+
+1. Ymaps that hold nothing at all (no entities, grass, occluders, lights, car spawns or timecycle zones) are always set aside. There is no visible change.
+2. If the map is still over, grass-only ymaps are set aside, smallest first, until it fits. Those areas lose some grass and ground plants; buildings are never touched.
+
+Ymaps another ymap uses as its LOD parent, and script-loaded ymaps, are always kept. Set-aside files go to `_not_used/ymaps_removed/`, so moving one back into `stream/` restores it. The list is at the end of `pool-sizes.txt`.
+
+Defaults come from FiveM's `gameconfig.xml`. Other resources on the server use the same pools, so if the game still reports `Pool Full: <name>`, raise that pool further.
+
 ## Logs
 
 Every session is appended to `logs.txt` next to the exe (or `%AppData%\RpfToFiveM\logs.txt` if that folder isn't writable). **Open log** in the app opens it. The file keeps the last ~5 MB; older content moves to `logs.old.txt`.
