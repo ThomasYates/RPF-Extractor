@@ -55,6 +55,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CancelCommand = new RelayCommand(Cancel, () => IsRunning);
         OpenOutputCommand = new RelayCommand(OpenOutput, () => Directory.Exists(LastOutput ?? OutputFolder));
         ClearLogCommand = new RelayCommand(() => Log.Clear());
+        OpenLogFileCommand = new RelayCommand(OpenLogFile, () => File.Exists(AppLog.FilePath));
+
+        AppLog.SetFolders(() => new[]
+        {
+            (SourceFolder, "<source>"),
+            (OutputFolder, "<export>"),
+            (GameFolder, "<gta>"),
+        });
 
         RefreshPendingJob();
     }
@@ -71,6 +79,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ICommand CancelCommand { get; }
     public ICommand OpenOutputCommand { get; }
     public ICommand ClearLogCommand { get; }
+    public ICommand OpenLogFileCommand { get; }
 
     #region Bindable properties
 
@@ -257,6 +266,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         try
         {
+            AppLog.Write(LogLevel.Info,
+                $"Job {(resume ? "resumed" : "started")}: {(FiveMMode ? $"FiveM map '{FiveMResource.SanitizeResourceName(ResourceName)}'" : "folder dump")}, " +
+                $"z-fight {ZFight}, source {SourceFolder}, export {OutputFolder}, GTA V folder {(string.IsNullOrWhiteSpace(GameFolder) ? "not set" : GameFolder)}");
+
             using var journal = _jobs.OpenJournal();
             if (resume) AddLog(LogLevel.Info, $"Resuming: {journal.CompletedCount:N0} file(s) already done will be skipped.");
 
@@ -303,6 +316,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             StatusText = "Failed";
             AddLog(LogLevel.Error, ex.Message);
+            AppLog.Exception("Job failed", ex);
             AddLog(LogLevel.Info, "Progress is saved — fix the problem and use Resume to continue.");
             TaskbarState = TaskbarItemProgressState.Error;
         }
@@ -505,6 +519,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void AddLog(LogLevel level, string message, DateTime? time = null)
     {
+        AppLog.Write(level, message);
         Log.Add(new LogItem((time ?? DateTime.Now).ToString("HH:mm:ss"), level, message));
         while (Log.Count > MaxLogItems) Log.RemoveAt(0);
     }
@@ -544,6 +559,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var path = LastOutput ?? OutputFolder;
         if (Directory.Exists(path))
             Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
+    }
+
+    private static void OpenLogFile()
+    {
+        if (File.Exists(AppLog.FilePath))
+            Process.Start(new ProcessStartInfo(AppLog.FilePath) { UseShellExecute = true });
     }
 
     private void ResetStats()

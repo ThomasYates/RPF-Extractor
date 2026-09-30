@@ -169,6 +169,8 @@
                     <DockPanel Margin="0,20,0,8">
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                             <Button Style="{StaticResource LinkButton}" Content="Open output folder" Command="{Binding OpenOutputCommand}" />
+                            <Button Style="{StaticResource LinkButton}" Content="Open log" Margin="16,0,0,0" Command="{Binding OpenLogFileCommand}"
+                                    ToolTip="logs.txt next to the exe. Folder paths are hidden, so it's safe to share." />
                             <Button Style="{StaticResource LinkButton}" Content="Clear" Margin="16,0,0,0" Command="{Binding ClearLogCommand}" />
                         </StackPanel>
                         <TextBlock Style="{StaticResource SectionTitle}" Text="Log" />
