@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- NG key material, encrypted with the game's AES key (from CodeWalker, MIT). -->
+    <EmbeddedResource Include="Resources\magic.dat" LogicalName="RpfToFiveM.Core.magic.dat" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="RpfToFiveM.Tests" />
+  </ItemGroup>
+
+</Project>

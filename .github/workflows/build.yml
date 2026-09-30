@@ -1,0 +1,56 @@
+name: Build
+
+# main -> "latest" release, beta -> "beta" pre-release. Each push replaces that release's exe.
+on:
+  push:
+    branches: [main, beta]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Test
+        run: dotnet test tests/RpfToFiveM.Tests -c Release
+
+      - name: Publish exe
+        run: dotnet publish src/RpfToFiveM.App -c Release -o publish -p:Version=1.2.${{ github.run_number }}
+
+      - name: Update release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $short = $env:GITHUB_SHA.Substring(0, 7)
+          if ($env:GITHUB_REF_NAME -eq 'main') {
+            $tag = 'latest'; $title = "RPF Extractor (latest, $short)"; $asset = 'RPFExtractor.exe'; $flags = @('--latest')
+          } else {
+            $tag = 'beta'; $title = "RPF Extractor (beta, $short)"; $asset = 'RPFExtractor-beta.exe'; $flags = @('--prerelease')
+          }
+          Copy-Item publish/RPFExtractor.exe $asset
+
+          # Replace the previous build for this channel, moving its tag to this commit.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) { gh release delete $tag --cleanup-tag --yes }
+
+          $notes = @"
+          Automatic build of the ``$env:GITHUB_REF_NAME`` branch.
+
+          Commit: $env:GITHUB_SHA
+          Version: 1.2.${{ github.run_number }}
+          "@
+          gh release create $tag $asset --target $env:GITHUB_SHA --title $title --notes $notes @flags
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
