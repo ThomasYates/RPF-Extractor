@@ -64,6 +64,17 @@ The base-game texture/model index is built from the game's archive tables the fi
 
 Each file is recorded in a journal (`%AppData%\RpfToFiveM\job\`) as soon as it has been fully written. If the app crashes, is killed, or is closed or stopped mid-run, the next launch shows a banner offering to **Resume job**. Resuming skips files that were already finished and redoes the file that was cut off. A run that finishes clears the journal automatically.
 
+## Logs
+
+Every session is appended to `logs.txt` next to the exe (or `%AppData%\RpfToFiveM\logs.txt` if that folder isn't writable). **Open log** in the app opens it. The file keeps the last ~5 MB; older content moves to `logs.old.txt`.
+
+Folder paths are removed so the log can be shared when reporting a problem:
+- the chosen folders appear as `<source>`, `<export>` and `<gta>`
+- the user profile appears as `<home>` and the Windows user name as `<user>`
+- any other drive or network path appears as `<path>`, keeping only the file name
+
+Paths inside archives (such as `dlc.rpf/x64/levels/...`) are kept, since they show which file a problem came from. Crashes and failed jobs include the full error details.
+
 ## Encryption
 
 | Archive type | Needs GTA V folder? |
