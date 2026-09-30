@@ -14,6 +14,7 @@ internal sealed class YmapBuilder
     public const uint CMapDataHash = 3545841574;
     public const uint CEntityDefHash = 3461354627;
     public const uint PointerHash = 7;
+    public const uint GrassDataHash = 3985044770;
 
     private readonly string _name;
     private string? _parent;
@@ -27,6 +28,21 @@ internal sealed class YmapBuilder
     public static uint Hash(string s) => JenkHash.Hash(Encoding.ASCII.GetBytes(s.ToLowerInvariant()));
 
     private uint _flags;
+    private int _grassBatches;
+    private int _grassBytes;
+    private ushort _carGens, _timecycles, _boxOccluders;
+
+    /// <summary>Instanced grass stored in the graphics segment (0x6... addresses), like real grass ymaps.</summary>
+    public YmapBuilder Grass(int batches, int bytes = 4096)
+    {
+        _grassBatches = batches;
+        _grassBytes = bytes;
+        return this;
+    }
+
+    public YmapBuilder CarGenerators(int count) { _carGens = (ushort)count; return this; }
+    public YmapBuilder TimecycleModifiers(int count) { _timecycles = (ushort)count; return this; }
+    public YmapBuilder BoxOccluders(int count) { _boxOccluders = (ushort)count; return this; }
 
     /// <summary>Marks the ymap as script-loaded (an IPL state such as burnt/unburnt).</summary>
     public YmapBuilder Scripted()
@@ -52,7 +68,7 @@ internal sealed class YmapBuilder
     public byte[] Build()
     {
         const int MetaHeader = 0x70;
-        const int BlockCount = 3;
+        int BlockCount = _grassBatches > 0 ? 4 : 3;
         int blocksTable = MetaHeader;
         int mapDataPos = Align16(blocksTable + BlockCount * 16);
         int pointersPos = Align16(mapDataPos + 512);
@@ -64,11 +80,19 @@ internal sealed class YmapBuilder
         BinaryPrimitives.WriteInt32LittleEndian(d.AsSpan(0x10), 0x50524430);
         BinaryPrimitives.WriteInt32LittleEndian(d.AsSpan(0x1C), 1);
         BinaryPrimitives.WriteInt64LittleEndian(d.AsSpan(0x30), 0x50000000 + blocksTable);
-        BinaryPrimitives.WriteInt16LittleEndian(d.AsSpan(0x4C), BlockCount);
+        BinaryPrimitives.WriteInt16LittleEndian(d.AsSpan(0x4C), (short)BlockCount);
 
         WriteBlock(d, blocksTable, 0, CMapDataHash, 512, mapDataPos);
         WriteBlock(d, blocksTable, 1, PointerHash, _entities.Count * 8, pointersPos);
         WriteBlock(d, blocksTable, 2, CEntityDefHash, _entities.Count * 128, entitiesPos);
+        if (_grassBatches > 0)
+        {
+            // Graphics segment block: address 0x6..., offset 0 in the graphics pages.
+            var g = d.AsSpan(blocksTable + 3 * 16, 16);
+            BinaryPrimitives.WriteUInt32LittleEndian(g, GrassDataHash);
+            BinaryPrimitives.WriteInt32LittleEndian(g[4..], _grassBytes);
+            BinaryPrimitives.WriteInt64LittleEndian(g[8..], 0x60000000);
+        }
 
         // CMapData
         BinaryPrimitives.WriteUInt32LittleEndian(d.AsSpan(mapDataPos + 8), Hash(_name));
@@ -78,6 +102,11 @@ internal sealed class YmapBuilder
         BinaryPrimitives.WriteUInt64LittleEndian(d.AsSpan(mapDataPos + 96), arrayPtr);
         BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(mapDataPos + 104), (ushort)_entities.Count);
         BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(mapDataPos + 106), (ushort)_entities.Count);
+        BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(mapDataPos + 128 + 8), _boxOccluders);
+        BinaryPrimitives.WriteUInt64LittleEndian(d.AsSpan(mapDataPos + 200), _grassBatches > 0 ? 4ul : 0ul); // grass list -> block 4
+        BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(mapDataPos + 200 + 8), (ushort)_grassBatches);
+        BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(mapDataPos + 224 + 8), _timecycles);
+        BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(mapDataPos + 240 + 8), _carGens);
 
         for (int i = 0; i < _entities.Count; i++)
         {
@@ -103,7 +132,14 @@ internal sealed class YmapBuilder
             BinaryPrimitives.WriteUInt32LittleEndian(s[88..], e.NumChildren);
         }
 
-        return RpfBuilder.BuildRsc7(2, 0x20000001, 0x20000000, d);
+        if (_grassBatches == 0) return RpfBuilder.BuildRsc7(2, 0x20000001, 0x20000000, d);
+
+        // System pages first (padded to the size the flags describe), then graphics pages.
+        var (sysFlags, sysSize) = PageFlags(d.Length);
+        var (gfxFlags, gfxSize) = PageFlags(_grassBytes);
+        var all = new byte[sysSize + gfxSize];
+        d.CopyTo(all, 0);
+        return RpfBuilder.BuildRsc7(2, sysFlags, gfxFlags, all);
     }
 
     public void WriteTo(string path)
@@ -123,4 +159,12 @@ internal sealed class YmapBuilder
     private static void WriteFloat(Span<byte> s, float v) => BinaryPrimitives.WriteSingleLittleEndian(s, v);
 
     private static int Align16(int v) => (v + 15) & ~15;
+
+    /// <summary>Resource page flags describing one page big enough for <paramref name="length"/> bytes.</summary>
+    private static (uint Flags, int Size) PageFlags(int length)
+    {
+        int shift = 0;
+        while ((0x200 << shift) < length) shift++;
+        return (0x20000000u | 1u << 27 | (uint)shift, 0x200 << shift);
+    }
 }

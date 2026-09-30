@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
@@ -56,6 +57,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OpenOutputCommand = new RelayCommand(OpenOutput, () => Directory.Exists(LastOutput ?? OutputFolder));
         ClearLogCommand = new RelayCommand(() => Log.Clear());
         OpenLogFileCommand = new RelayCommand(OpenLogFile, () => File.Exists(AppLog.FilePath));
+        CopyPoolLinesCommand = new RelayCommand(CopyPoolLines, () => HasPoolLines);
 
         AppLog.SetFolders(() => new[]
         {
@@ -80,6 +82,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ICommand OpenOutputCommand { get; }
     public ICommand ClearLogCommand { get; }
     public ICommand OpenLogFileCommand { get; }
+    public ICommand CopyPoolLinesCommand { get; }
 
     #region Bindable properties
 
@@ -192,6 +195,28 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _statusText = "Idle";
     public string StatusText { get => _statusText; private set => Set(ref _statusText, value); }
 
+    /// <summary>Steps for the running job, shown under the progress bar.</summary>
+    public ObservableCollection<StepItem> Steps { get; } = new();
+    private StepKey? _currentStep;
+    private string _stepTitle = "";
+
+    private bool _hasPoolAdvice;
+    public bool HasPoolAdvice { get => _hasPoolAdvice; private set => Set(ref _hasPoolAdvice, value); }
+
+    private string _poolLines = "";
+    public string PoolLines
+    {
+        get => _poolLines;
+        private set { if (Set(ref _poolLines, value)) OnPropertyChanged(nameof(HasPoolLines)); }
+    }
+    public bool HasPoolLines => PoolLines.Length > 0;
+
+    private string _poolNote = "";
+    public string PoolNote { get => _poolNote; private set => Set(ref _poolNote, value); }
+
+    private string _stepText = "";
+    public string StepText { get => _stepText; private set => Set(ref _stepText, value); }
+
     private string _percentText = "0.0";
     public string PercentText { get => _percentText; private set => Set(ref _percentText, value); }
 
@@ -273,11 +298,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             using var journal = _jobs.OpenJournal();
             if (resume) AddLog(LogLevel.Info, $"Resuming: {journal.CompletedCount:N0} file(s) already done will be skipped.");
 
-            StatusText = "Loading keys";
+            BuildSteps();
+            EnterStep(StepKey.Prepare);
             var keys = await LoadKeysAsync();
-            var gameAssets = ZFight == ZFightMode.Off ? null : await LoadGameAssetsAsync(keys, _cts.Token);
+            // The pool check (FiveM mode) also uses the base-game index, for how full each pool already is.
+            var gameAssets = ZFight == ZFightMode.Off && !FiveMMode ? null : await LoadGameAssetsAsync(keys, _cts.Token);
+            var poolLimits = FiveMMode ? await FetchPoolLimitsAsync(_cts.Token) : null;
 
-            StatusText = "Scanning";
+            EnterStep(StepKey.Scan);
             _activeTime.Restart();
             var options = new ExtractionOptions
             {
@@ -289,11 +317,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 Journal = journal,
                 ZFight = ZFight,
                 GameAssets = gameAssets,
+                PoolLimits = poolLimits,
             };
             var progress = new Progress<ExtractionProgress>(OnProgress);
             var result = await new RpfExtractor().RunAsync(options, progress, OnLog, _pause, _cts.Token);
 
             finished = true;
+            ShowPoolAdvice(result.Pools);
             // With two outputs, open their shared parent so both are visible.
             LastOutput = result.FixedOutputRoot is null ? result.OutputRoot : Path.GetDirectoryName(result.OutputRoot);
             if (result.FixedOutputRoot is not null)
@@ -305,16 +335,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
             PercentText = "100.0";
             EtaText = "—";
             TaskbarState = result.ErrorCount == 0 ? TaskbarItemProgressState.None : TaskbarItemProgressState.Error;
+            FinishSteps(StepState.Done);
+            StepText = result.ErrorCount == 0 ? "All steps finished." : "Finished with errors. See the log below for details.";
         }
         catch (OperationCanceledException)
         {
             StatusText = "Stopped";
+            FinishSteps(StepState.Stopped);
+            StepText = "Stopped. Progress is saved; use Resume job to carry on later.";
             AddLog(LogLevel.Warning, "Stopped. Progress is saved — use Resume to continue later.");
             TaskbarState = TaskbarItemProgressState.None;
         }
         catch (Exception ex)
         {
             StatusText = "Failed";
+            FinishSteps(StepState.Stopped);
+            StepText = "Failed. See the log below; progress is saved.";
             AddLog(LogLevel.Error, ex.Message);
             AppLog.Exception("Job failed", ex);
             AddLog(LogLevel.Info, "Progress is saved — fix the problem and use Resume to continue.");
@@ -421,7 +457,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var folder = GameFolder?.Trim() ?? "";
         if (folder.Length == 0 || keys is null)
         {
-            AddLog(LogLevel.Info, "Z-fight check without a GTA V folder: only exact duplicates and models with no textures at all can be fixed.");
+            AddLog(LogLevel.Info, "No GTA V folder set: the z-fight check only fixes exact duplicates and models with no textures at all, and pool sizes use built-in base game counts.");
             return null;
         }
         try
@@ -436,6 +472,46 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             AddLog(LogLevel.Warning, $"Couldn't index the base game ({ex.Message}); the z-fight check will be more cautious.");
             return null;
+        }
+    }
+
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
+
+    /// <summary>FiveM's live list of pools servers may raise, and by how much. Falls back to a built-in copy offline.</summary>
+    private async Task<IReadOnlyDictionary<string, int>?> FetchPoolLimitsAsync(CancellationToken ct)
+    {
+        var limits = await PoolAdvisor.FetchLimitsAsync(Http, ct);
+        if (limits is null) AddLog(LogLevel.Info, "Couldn't fetch FiveM's pool limits (offline?); using the built-in list.");
+        return limits;
+    }
+
+    private void ShowPoolAdvice(PoolReport? report)
+    {
+        PoolLines = report?.ServerCfgLines ?? "";
+        HasPoolAdvice = report is not null && (report.HasRecommendations || report.HasWarnings);
+        if (!HasPoolAdvice) { PoolNote = ""; return; }
+
+        var parts = new List<string>();
+        var raise = report!.Pools.Where(p => p.Status is PoolStatus.Increase or PoolStatus.CannotFit).ToList();
+        if (raise.Count > 0)
+            parts.Add($"This map would overflow or nearly fill {string.Join(", ", raise.Select(p => p.Pool))}. " +
+                      "Paste these lines into server.cfg (before your resources start), then restart the server.");
+        foreach (var p in report.Pools.Where(p => p.Status is PoolStatus.NotRaisable or PoolStatus.CannotFit))
+            parts.Add($"{p.Pool}: {p.Advice}");
+        parts.Add("Full breakdown in pool-sizes.txt in the resource folder.");
+        PoolNote = string.Join(Environment.NewLine, parts);
+    }
+
+    private void CopyPoolLines()
+    {
+        try
+        {
+            Clipboard.SetText(PoolLines);
+            AddLog(LogLevel.Info, "server.cfg lines copied to the clipboard.");
+        }
+        catch (System.Runtime.InteropServices.COMException)
+        {
+            AddLog(LogLevel.Warning, "Couldn't reach the clipboard; select the lines and press Ctrl+C instead.");
         }
     }
 
@@ -454,48 +530,120 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>The steps this job will go through, based on the chosen format and z-fight mode.</summary>
+    private void BuildSteps()
+    {
+        var res = FiveMResource.SanitizeResourceName(ResourceName);
+        var list = new List<(StepKey Key, string Name, string Title, string Hint)>
+        {
+            (StepKey.Prepare, "Prepare", "Getting ready",
+                "Loading decryption keys and, for the z-fight check, indexing the base game (slow only the first time)."),
+            (StepKey.Scan, "Scan", "Scanning archives",
+                "Reading every archive's table of contents to count what needs extracting. Nothing is written yet."),
+            (StepKey.Extract, "Extract", "Extracting",
+                "Unpacking files from the archives into the export folder."),
+        };
+        if (FiveMMode)
+            list.Add((StepKey.Finish, "Finish", "Finishing up",
+                "Writing fxmanifest.lua and sorting meta files into data/ and _not_used/."));
+        if (ZFight == ZFightMode.Both)
+            list.Add((StepKey.Copy, "Copy for z-fix", "Copying for the z-fix version",
+                FiveMMode
+                    ? $"Copying the finished map to {res}_zfix, so {res} stays untouched and the copy gets fixed."
+                    : "Copying the finished dump to \"extracted (ZFightFix)\", so the original stays untouched and the copy gets fixed."));
+        if (ZFight != ZFightMode.Off)
+            list.Add((StepKey.ZFight, "Z-fight check", "Checking for z-fighting",
+                "Finding duplicate or grey copies of buildings in the same spot and removing them. Details go in zfight-report.txt."));
+
+        Steps.Clear();
+        for (int i = 0; i < list.Count; i++)
+            Steps.Add(new StepItem(list[i].Key, list[i].Name, list[i].Title, list[i].Hint, isFirst: i == 0));
+        _currentStep = null;
+    }
+
+    /// <summary>Marks earlier steps done and this one active, and resets the per-step counters.</summary>
+    private void EnterStep(StepKey key)
+    {
+        if (_currentStep == key) return;
+        _currentStep = key;
+        int index = Steps.ToList().FindIndex(s => s.Key == key);
+        for (int i = 0; i < Steps.Count; i++)
+            Steps[i].State = i < index ? StepState.Done : i == index ? StepState.Active : StepState.Pending;
+
+        var step = index >= 0 ? Steps[index] : null;
+        _stepTitle = step?.Title ?? "";
+        StepText = step is null ? "" : $"Step {index + 1} of {Steps.Count}: {step.Hint}";
+        if (!IsPaused) StatusText = _stepTitle;
+
+        // Each step has its own progress and rate.
+        _speedSamples.Clear();
+        ProgressValue = 0;
+        PercentText = "0.0";
+        SpeedText = EtaText = "—";
+    }
+
+    private void FinishSteps(StepState last)
+    {
+        for (int i = 0; i < Steps.Count; i++)
+        {
+            if (last == StepState.Done) Steps[i].State = StepState.Done;
+            else if (Steps[i].State == StepState.Active) Steps[i].State = last;
+        }
+        _currentStep = null;
+    }
+
     private void OnProgress(ExtractionProgress p)
     {
         ElapsedText = FormatDuration(_activeTime.Elapsed);
         CurrentItem = p.CurrentItem;
 
-        if (p.Phase == ExtractionPhase.Scanning)
+        StepKey? step = p.Phase switch
         {
-            IsIndeterminate = true;
-            TaskbarState = IsPaused ? TaskbarItemProgressState.Paused : TaskbarItemProgressState.Indeterminate;
-            StatusText = IsPaused ? "Paused" : "Scanning";
-            return;
-        }
+            ExtractionPhase.Scanning => StepKey.Scan,
+            ExtractionPhase.Extracting => StepKey.Extract,
+            ExtractionPhase.Finishing => StepKey.Finish,
+            ExtractionPhase.CopyingForZFix => StepKey.Copy,
+            ExtractionPhase.CheckingZFight => StepKey.ZFight,
+            _ => null,
+        };
+        if (step is null) return; // Completed is handled when the job returns
+        EnterStep(step.Value);
 
-        if (p.Phase == ExtractionPhase.CheckingZFight)
-        {
-            IsIndeterminate = false;
-            ProgressValue = p.Fraction;
-            PercentText = $"{p.Fraction * 100:0.0}";
-            FilesText = $"{p.FilesDone:N0} / {p.FilesTotal:N0} ymaps";
-            SpeedText = EtaText = "—";
-            if (!IsPaused) StatusText = "Checking for z-fighting";
-            return;
-        }
+        bool indeterminate = p.Phase is ExtractionPhase.Scanning or ExtractionPhase.Finishing
+                             || (p.Phase == ExtractionPhase.CheckingZFight && p.FilesTotal == 0);
+        IsIndeterminate = indeterminate;
+        TaskbarState = IsPaused ? TaskbarItemProgressState.Paused
+            : indeterminate ? TaskbarItemProgressState.Indeterminate : TaskbarItemProgressState.Normal;
+        if (indeterminate) return;
 
-        // Remember the total so the resume prompt can show "x of y".
-        if (_currentJob is not null && _currentJob.FilesTotal != p.FilesTotal)
-        {
-            _currentJob.FilesTotal = p.FilesTotal;
-            _jobs.Save(_currentJob);
-        }
-
-        IsIndeterminate = false;
         ProgressValue = p.Fraction;
         PercentText = $"{p.Fraction * 100:0.0}";
-        FilesText = $"{p.FilesDone:N0} / {p.FilesTotal:N0}";
-        SizeText = $"{FormatBytes(p.BytesDone)} / {FormatBytes(p.BytesTotal)}";
-        if (!IsPaused)
+
+        switch (p.Phase)
         {
-            StatusText = p.Phase == ExtractionPhase.Completed ? "Finishing" : "Extracting";
-            TaskbarState = TaskbarItemProgressState.Normal;
+            case ExtractionPhase.CheckingZFight:
+                FilesText = $"{p.FilesDone:N0} / {p.FilesTotal:N0} ymaps";
+                SizeText = SpeedText = EtaText = "—";
+                break;
+
+            case ExtractionPhase.CopyingForZFix:
+                FilesText = $"{p.FilesDone:N0} / {p.FilesTotal:N0}";
+                SizeText = $"{FormatBytes(p.BytesDone)} / {FormatBytes(p.BytesTotal)}";
+                UpdateSpeed(p);
+                break;
+
+            default:
+                // Remember the total so the resume prompt can show "x of y".
+                if (_currentJob is not null && _currentJob.FilesTotal != p.FilesTotal)
+                {
+                    _currentJob.FilesTotal = p.FilesTotal;
+                    _jobs.Save(_currentJob);
+                }
+                FilesText = $"{p.FilesDone:N0} / {p.FilesTotal:N0}";
+                SizeText = $"{FormatBytes(p.BytesDone)} / {FormatBytes(p.BytesTotal)}";
+                UpdateSpeed(p);
+                break;
         }
-        UpdateSpeed(p);
     }
 
     private void UpdateSpeed(ExtractionProgress p)
@@ -532,7 +680,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _activeTime.Start();
             _speedSamples.Clear();
             IsPaused = false;
-            StatusText = IsIndeterminate ? "Scanning" : "Extracting";
+            StatusText = _stepTitle;
             TaskbarState = IsIndeterminate ? TaskbarItemProgressState.Indeterminate : TaskbarItemProgressState.Normal;
             AddLog(LogLevel.Info, "Resumed.");
         }
@@ -569,6 +717,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void ResetStats()
     {
+        ShowPoolAdvice(null);
         ProgressValue = 0;
         PercentText = "0.0";
         FilesText = SizeText = SpeedText = EtaText = ElapsedText = "—";

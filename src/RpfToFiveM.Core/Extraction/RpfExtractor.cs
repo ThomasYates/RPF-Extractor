@@ -41,6 +41,8 @@ public sealed class RpfExtractor
         private readonly string _source;
         private readonly string _outputRoot;
         private readonly string? _fixedRoot;
+        private TrimResult? _trim;
+        private string? _fixedWritten; // set once the z-fixed copy actually exists
         private readonly bool _fiveM;
         private readonly IProgressJournal? _journal;
 
@@ -118,11 +120,18 @@ public sealed class RpfExtractor
                 ProcessArchive(archive);
             }
             foreach (var loose in looseMaps) ProcessLoose(loose);
+            Report(force: true); // final extraction totals, even if every file fit inside one report interval
 
             if (_fiveM)
             {
+                ReportStep(ExtractionPhase.Finishing, 0, 0, 0, 0, "Writing fxmanifest.lua and sorting meta files");
                 var support = SupportFileProcessor.Process(_outputRoot, _supportFiles, _claimedNames.Add, _log);
                 WriteManifest(support.DataFiles);
+
+                // Keep the ymap count under FiveM's limit before anything copies or counts the output.
+                _trim = YmapTrimmer.Trim(_outputRoot, _options.GameAssets?.CountOf(".ymap") ?? PoolAdvisor.BuiltInBaseCounts[".ymap"],
+                    PoolAdvisor.MapDataStoreSize, PoolAdvisor.YmapSpare, _log,
+                    _options.GameAssets is { } assets ? name => assets.Contains(".ymap", name) : null);
             }
 
             if (_filesResumed > 0)
@@ -138,6 +147,7 @@ public sealed class RpfExtractor
                 $"Done: {_filesWritten:N0} file(s) written to {_outputRoot} with {_errors} error(s).");
 
             RunZFightCheck();
+            var pools = _fiveM ? CheckPoolSizes() : null;
 
             _current = "Done";
             _progress?.Report(new ExtractionProgress(ExtractionPhase.Completed, _bytesDone, _bytesTotal, _filesDone, _filesTotal, _current));
@@ -145,12 +155,13 @@ public sealed class RpfExtractor
             return new ExtractionResult
             {
                 OutputRoot = _outputRoot,
-                FixedOutputRoot = _fixedRoot,
+                FixedOutputRoot = _fixedWritten,
                 FilesWritten = _filesWritten,
                 ErrorCount = _errors,
                 DuplicatesSkipped = _duplicates,
                 FilesResumed = _filesResumed,
                 BytesRead = _bytesDone,
+                Pools = pools,
             };
         }
 
@@ -162,35 +173,119 @@ public sealed class RpfExtractor
         {
             if (_options.ZFight == ZFightMode.Off) return;
 
-            var target = _fixedRoot ?? _outputRoot;
-            Directory.CreateDirectory(target);
+            var target = _outputRoot;
             if (_fixedRoot is not null)
             {
-                Log(LogLevel.Info, $"Copying output to {_fixedRoot} for the z-fixed version.");
-                CopyTree(_outputRoot, _fixedRoot);
+                if (!CopyForZFix(_outputRoot, _fixedRoot)) return;
+                target = _fixedWritten = _fixedRoot;
             }
 
-            _current = "Checking for z-fighting";
+            ReportStep(ExtractionPhase.CheckingZFight, 0, 0, 0, 0, "Loading ymaps");
             ZFightFixer.Run(target, new ZFightOptions
                 {
                     VanillaTextureDictionaries = _options.GameAssets?.TextureDictionaries,
                     KnownNames = _options.GameAssets?.Names,
                 },
                 _log, _ct,
-                (done, total) => _progress?.Report(new ExtractionProgress(ExtractionPhase.CheckingZFight, done, total,
-                    done, total, $"Checking ymaps ({done:N0}/{total:N0})")),
+                (done, total) => ReportStep(ExtractionPhase.CheckingZFight, done, total, done, total,
+                    done < total ? $"Reading ymaps ({done:N0}/{total:N0})" : "Comparing buildings and writing zfight-report.txt",
+                    force: done == 0 || done == total),
                 Checkpoint);
         }
 
-        private void CopyTree(string from, string to)
+        /// <summary>
+        /// Counts what the map adds to each game pool and writes pool-sizes.txt (plus any
+        /// increase_pool_size lines) into the resource.
+        /// </summary>
+        private PoolReport CheckPoolSizes()
         {
-            foreach (var file in Directory.EnumerateFiles(from, "*", SearchOption.AllDirectories))
+            var index = _options.GameAssets;
+            var added = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            int mlos = 0;
+            var stream = Path.Combine(_outputRoot, "stream");
+            if (Directory.Exists(stream))
+            {
+                foreach (var file in Directory.EnumerateFiles(stream, "*", SearchOption.AllDirectories))
+                {
+                    var ext = Path.GetExtension(file).ToLowerInvariant();
+                    var name = Path.GetFileNameWithoutExtension(file);
+                    // A file with the same name as a base-game file replaces it rather than taking a new slot.
+                    if (index is not null && index.Contains(ext, name)) continue;
+                    if (!added.TryGetValue(ext, out var set)) added[ext] = set = new(StringComparer.OrdinalIgnoreCase);
+                    set.Add(name);
+
+                    if (ext == ".ymap")
+                    {
+                        try { mlos += YmapFile.Parse(File.ReadAllBytes(file)).Entities.Count(e => e.IsMlo); }
+                        catch (Exception ex) when (ex is InvalidDataException or IOException) { }
+                    }
+                }
+            }
+
+            var report = PoolAdvisor.Analyze(added.ToDictionary(kv => kv.Key, kv => kv.Value.Count),
+                index?.Counts, _options.PoolLimits, mlos);
+            var text = PoolAdvisor.BuildReport(report, _trim);
+            File.WriteAllText(Path.Combine(_outputRoot, PoolAdvisor.ReportFileName), text);
+            if (_fixedWritten is not null) File.WriteAllText(Path.Combine(_fixedWritten, PoolAdvisor.ReportFileName), text);
+
+            if (report.HasRecommendations)
+                Log(LogLevel.Warning, "This map needs bigger game pools. Add to server.cfg:" + Environment.NewLine + report.ServerCfgLines);
+            foreach (var p in report.Pools.Where(p => p.Status == PoolStatus.NotRaisable))
+                Log(LogLevel.Warning, $"{p.Pool}: {p.Advice}");
+            if (!report.HasRecommendations && !report.HasWarnings)
+                Log(LogLevel.Info, "Pool sizes: the default FiveM pools have room for this map.");
+            return report;
+        }
+
+        /// <summary>Copies the finished output for the z-fixed version, with its own progress.</summary>
+        /// <returns>False when there isn't room for the copy (the untouched output is still complete).</returns>
+        private bool CopyForZFix(string from, string to)
+        {
+            var files = Directory.EnumerateFiles(from, "*", SearchOption.AllDirectories)
+                .Select(f => new FileInfo(f)).ToList();
+            long total = files.Sum(f => f.Length);
+
+            // Existing files in the target are overwritten, so they don't count against the space needed.
+            long already = Directory.Exists(to)
+                ? Directory.EnumerateFiles(to, "*", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length)
+                : 0;
+            long needed = Math.Max(0, total - already);
+            var free = _options.FreeSpace(to);
+            if (free is not null && free < needed + 64L * 1024 * 1024)
+            {
+                _errors++;
+                Log(LogLevel.Error, $"Not enough disk space for the z-fixed copy: it needs {needed / 1073741824.0:N1} GB " +
+                    $"but only {free.Value / 1073741824.0:N1} GB is free. The untouched output is complete. " +
+                    "Use Z-fight fix \"On\" to fix it in place, or export to a drive with more space.");
+                return false;
+            }
+
+            Log(LogLevel.Info, $"Copying output to {to} for the z-fixed version ({total / 1073741824.0:N1} GB).");
+            long done = 0;
+            for (int i = 0; i < files.Count; i++)
             {
                 Checkpoint();
-                var dest = Path.Combine(to, Path.GetRelativePath(from, file));
+                var file = files[i];
+                var rel = Path.GetRelativePath(from, file.FullName);
+                var dest = Path.Combine(to, rel);
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                File.Copy(file, dest, overwrite: true);
+                File.Copy(file.FullName, dest, overwrite: true);
+                done += file.Length;
+                ReportStep(ExtractionPhase.CopyingForZFix, done, total, i + 1, files.Count, rel.Replace('\\', '/'),
+                    force: i == files.Count - 1);
             }
+            if (files.Count == 0) ReportStep(ExtractionPhase.CopyingForZFix, 0, 0, 0, 0, "Nothing to copy", force: true);
+            return true;
+        }
+
+        /// <summary>Progress for the steps after extraction, each with its own counters.</summary>
+        private void ReportStep(ExtractionPhase phase, long bytesDone, long bytesTotal, int filesDone, int filesTotal,
+            string current, bool force = true)
+        {
+            if (_progress is null || (!force && _sinceReport.Elapsed < ReportInterval)) return;
+            _sinceReport.Restart();
+            _current = current;
+            _progress.Report(new ExtractionProgress(phase, bytesDone, bytesTotal, filesDone, filesTotal, current));
         }
 
         private IEnumerable<string> FindFiles(string pattern)

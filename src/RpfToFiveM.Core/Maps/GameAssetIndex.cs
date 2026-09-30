@@ -18,6 +18,20 @@ public sealed class GameAssetIndex
     public HashSet<uint> TextureDictionaries { get; } = new();
     public Dictionary<uint, string> Names { get; } = new();
 
+    // Unique file names per streamable type, for estimating how full each game pool is.
+    private static readonly string[] PoolExtensions = { ".ytd", ".ydr", ".ydd", ".yft", ".ybn", ".ytyp", ".ymap" };
+    private readonly Dictionary<string, HashSet<uint>> _byExtension =
+        PoolExtensions.ToDictionary(e => e, _ => new HashSet<uint>(), StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>How many different files of this type (e.g. ".ybn") the base game has.</summary>
+    public int CountOf(string extension) => _byExtension.TryGetValue(extension, out var s) ? s.Count : 0;
+
+    /// <summary>True if the base game has a file of this type and name (a same-named map file replaces it).</summary>
+    public bool Contains(string extension, string name) =>
+        _byExtension.TryGetValue(extension, out var s) && s.Contains(Hash(name.ToLowerInvariant()));
+
+    public IReadOnlyDictionary<string, int> Counts => _byExtension.ToDictionary(kv => kv.Key, kv => kv.Value.Count);
+
     public static GameAssetIndex Build(string gameFolder, GtaKeys? keys, CancellationToken ct)
     {
         var index = new GameAssetIndex();
@@ -54,6 +68,8 @@ public sealed class GameAssetIndex
                     var loaded = new GameAssetIndex();
                     loaded.TextureDictionaries.UnionWith(cached.TextureDictionaries);
                     foreach (var name in cached.Names) loaded.Names.TryAdd(Hash(name), name);
+                    foreach (var (ext, hashes) in cached.ByExtension)
+                        if (loaded._byExtension.TryGetValue(ext, out var set)) set.UnionWith(hashes);
                     return loaded;
                 }
             }
@@ -65,13 +81,14 @@ public sealed class GameAssetIndex
         {
             Directory.CreateDirectory(Path.GetDirectoryName(cacheFile)!);
             File.WriteAllText(cacheFile, JsonSerializer.Serialize(
-                new Cache(stamp, index.TextureDictionaries.ToArray(), index.Names.Values.ToArray())));
+                new Cache(stamp, index.TextureDictionaries.ToArray(), index.Names.Values.ToArray(),
+                    index._byExtension.ToDictionary(kv => kv.Key, kv => kv.Value.ToArray()))));
         }
         catch (IOException) { }
         return index;
     }
 
-    private sealed record Cache(string Stamp, uint[] TextureDictionaries, string[] Names);
+    private sealed record Cache(string Stamp, uint[] TextureDictionaries, string[] Names, Dictionary<string, uint[]> ByExtension);
 
     private void Collect(RpfArchive archive, CancellationToken ct)
     {
@@ -87,6 +104,7 @@ public sealed class GameAssetIndex
 
             var ext = Path.GetExtension(file.Name);
             var name = Path.GetFileNameWithoutExtension(file.Name).ToLowerInvariant();
+            if (_byExtension.TryGetValue(ext, out var byExt)) byExt.Add(Hash(name));
             if (ext.Equals(".ytd", StringComparison.OrdinalIgnoreCase))
                 TextureDictionaries.Add(Hash(name));
             else if (ModelExtensions.Contains(ext))
@@ -101,6 +119,6 @@ public sealed class GameAssetIndex
     {
         var exe = GameLocator.FindExecutable(gameFolder);
         var info = exe is null ? null : new FileInfo(exe);
-        return $"{Path.GetFullPath(gameFolder)}|{info?.Length}|{info?.LastWriteTimeUtc.Ticks}";
+        return $"v2|{Path.GetFullPath(gameFolder)}|{info?.Length}|{info?.LastWriteTimeUtc.Ticks}";
     }
 }

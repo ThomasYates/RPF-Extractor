@@ -79,6 +79,22 @@ public sealed class RpfResourceEntry : RpfFileEntry
 
     public uint Version => VersionFromFlags(SystemFlags, GraphicsFlags);
 
+    /// <summary>Byte size of the system or graphics pages described by a resource's page flags.</summary>
+    public static int SizeFromFlags(uint flags)
+    {
+        uint s0 = (flags >> 27 & 0x1) << 0;
+        uint s1 = (flags >> 26 & 0x1) << 1;
+        uint s2 = (flags >> 25 & 0x1) << 2;
+        uint s3 = (flags >> 24 & 0x1) << 3;
+        uint s4 = (flags >> 17 & 0x7F) << 4;
+        uint s5 = (flags >> 11 & 0x3F) << 5;
+        uint s6 = (flags >> 7 & 0xF) << 6;
+        uint s7 = (flags >> 5 & 0x3) << 7;
+        uint s8 = (flags >> 4 & 0x1) << 8;
+        int baseSize = 0x200 << (int)(flags & 0xF);
+        return (int)(baseSize * (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8));
+    }
+
     public static uint VersionFromFlags(uint systemFlags, uint graphicsFlags) =>
         (systemFlags >> 28 & 0xF) << 4 | graphicsFlags >> 28 & 0xF;
 
